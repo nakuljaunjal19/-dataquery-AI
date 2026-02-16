@@ -1,0 +1,10 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+.venv
+venv
+*.md
+!README.md
+inventory.db
+.streamlit/secrets.toml
