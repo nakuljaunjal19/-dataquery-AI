@@ -18,8 +18,15 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def _is_streamlit_cloud() -> bool:
-    """Streamlit Community Cloud sets this when the app is deployed."""
-    return os.environ.get("STREAMLIT_SHARING_MODE", "").lower() in ("true", "1")
+    """True when running on Streamlit Community Cloud (hide dev-only UI)."""
+    sm = os.environ.get("STREAMLIT_SHARING_MODE", "").lower()
+    if sm in ("true", "1"):
+        return True
+    if os.environ.get("STREAMLIT_CLOUD", "").lower() in ("true", "1", "yes"):
+        return True
+    if os.environ.get("DEPLOYMENT_PLATFORM", "").lower() == "streamlit_cloud":
+        return True
+    return False
 
 
 # Bump when you ship — shown in footer if git hash unavailable (e.g. on Cloud)
@@ -208,6 +215,17 @@ ORDER BY total_revenue_usd DESC
 """.strip(),
 }
 
+# Default hints for bundled demo CSV (users can override in Data Dictionary)
+DEFAULT_COLUMN_DESCRIPTIONS = {
+    "order_id": "Unique order identifier",
+    "order_date": "Date of order (YYYY-MM-DD)",
+    "brand": "Product brand name",
+    "model_name": "Product model",
+    "category": "Product category",
+    "revenue_usd": "Revenue in US dollars",
+    "units_sold": "Number of units sold",
+}
+
 
 def get_canned_demo_sql(query: str, schema: dict, dialect: str) -> Optional[str]:
     """Return exact SQL for known demo questions when inventory table exists (SQLite)."""
@@ -252,6 +270,28 @@ def build_schema_prompt_with_samples(schema: dict, conn) -> str:
             pass
         parts.append("")
     return "\n".join(parts).strip()
+
+
+def merge_column_descriptions_into_schema_text(
+    base: str, schema: dict, descriptions: Optional[dict]
+) -> str:
+    """Append user-provided column meanings so the LLM can disambiguate joins and filters."""
+    if not descriptions:
+        return base
+    lines = []
+    for table, cols in schema.items():
+        for col in cols:
+            key_full = f"{table}.{col}"
+            text = descriptions.get(key_full) or descriptions.get(col)
+            if text and str(text).strip():
+                lines.append(f"  {key_full}: {str(text).strip()}")
+    if not lines:
+        return base
+    return (
+        base
+        + "\n\nColumn descriptions (from user data dictionary — use for filters and joins):\n"
+        + "\n".join(lines)
+    )
 
 
 def validate_readonly_sql(sql: str) -> Tuple[bool, str]:
@@ -441,11 +481,13 @@ Question: {question}"""
         err = str(e).lower()
         if "refused" in err or "10061" in err or "timed out" in err or "failed to establish" in err:
             st.error(
-                "**Ollama not reachable** — Start it with `ollama serve`, then run `ollama pull llama3.2`. "
-                "Or switch to **Gemini (cloud)** in the sidebar and add your API key."
+                "**Ollama not detected** (expected at **localhost:11434**). Start it with `ollama serve`, "
+                "then `ollama pull llama3.2`. Or switch to **Gemini (cloud)** in the sidebar and add your API key."
             )
         else:
-            st.error(f"Ollama error: {e}. Check that Ollama is running on {base_url}")
+            st.error(
+                f"Ollama error on {base_url}: {e}. If Ollama is not running, start `ollama serve` or use Gemini."
+            )
         return None
 
 
@@ -644,6 +686,10 @@ def create_chart(df: pd.DataFrame, query_text: str, chart_type: str = "auto"):
             fig = px.pie(plot_df, names=cat_col, values=num_col, title=title, template="plotly_dark", hole=0.5)
             fig.update_layout(**layout, colorway=px.colors.qualitative.Set3)
 
+        elif chart_type == "pie" and cat_col and num_col:
+            fig = px.pie(plot_df, names=cat_col, values=num_col, title=title, template="plotly_dark", hole=0)
+            fig.update_layout(**layout, colorway=px.colors.qualitative.Set3)
+
         else:
             if not cat_col or not num_col:
                 return None
@@ -720,8 +766,8 @@ def main():
         api_key = manual_key
         if not on_cloud and not manual_key and api_key_from_secrets:
             api_key = api_key_from_secrets
-            # Dev-only hint: never show on Cloud (no secrets.toml in deploy); avoids confusing recruiters.
-            if (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
+            # Dev-only: never on Streamlit Cloud (recruiters don't need implementation details).
+            if not _is_streamlit_cloud() and (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
                 st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev only).")
     else:
         api_key = ""
@@ -753,6 +799,8 @@ def main():
     # --- Initialize query history (before sidebar reads it) ---
     if "query_history" not in st.session_state:
         st.session_state.query_history = []
+    if "column_descriptions" not in st.session_state:
+        st.session_state.column_descriptions = dict(DEFAULT_COLUMN_DESCRIPTIONS)
 
     # --- Sidebar: File upload & schema ---
     with st.sidebar:
@@ -860,18 +908,41 @@ def main():
                 st.caption(", ".join(cols[:10]) + ("..." if len(cols) > 10 else ""))
         st.markdown("---")
         st.markdown("#### 📖 Data Dictionary")
-        data_dict = {
-            "order_id": "Unique order identifier",
-            "order_date": "Date of order (YYYY-MM-DD)",
-            "brand": "Product brand name",
-            "model_name": "Product model",
-            "category": "Product category",
-            "revenue_usd": "Revenue in US dollars",
-            "units_sold": "Number of units sold",
-        }
-        with st.expander("Column meanings", expanded=False):
-            for col, desc in list(data_dict.items())[:8]:
-                st.caption(f"**{col}**: {desc}")
+        st.caption("Descriptions are sent to the AI with your schema — improves filters and JOINs.")
+        desc_rows = []
+        for table, cols in schema.items():
+            for col in cols:
+                k = f"{table}.{col}"
+                default = DEFAULT_COLUMN_DESCRIPTIONS.get(col, "")
+                desc_rows.append(
+                    {
+                        "table": table,
+                        "column": col,
+                        "description": st.session_state.column_descriptions.get(k, default),
+                    }
+                )
+        with st.expander("Column meanings (editable)", expanded=False):
+            if desc_rows:
+                df_cd = pd.DataFrame(desc_rows)
+                edited_cd = st.data_editor(
+                    df_cd,
+                    column_config={
+                        "table": st.column_config.Column("Table", disabled=True, width="small"),
+                        "column": st.column_config.Column("Column", disabled=True, width="small"),
+                        "description": st.column_config.TextColumn(
+                            "Plain English meaning", width="large"
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    key="column_desc_editor",
+                )
+                for _, row in edited_cd.iterrows():
+                    kk = f"{row['table']}.{row['column']}"
+                    st.session_state.column_descriptions[kk] = str(row.get("description") or "").strip()
+            else:
+                st.caption("No columns loaded.")
         st.markdown("---")
         if "query_history" in st.session_state and st.session_state.query_history:
             st.markdown("#### 📜 Recent queries")
@@ -889,7 +960,11 @@ def main():
     except Exception:
         pass
 
-    schema_prompt_str = build_schema_prompt_with_samples(schema, conn)
+    schema_prompt_str = merge_column_descriptions_into_schema_text(
+        build_schema_prompt_with_samples(schema, conn),
+        schema,
+        st.session_state.column_descriptions,
+    )
     if "sql_cache" not in st.session_state:
         st.session_state.sql_cache = {}
 
@@ -996,67 +1071,94 @@ def main():
                         st.button(examples[i], key=f"chip_{i}", on_click=_set_query, args=(examples[i],), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
-    if not query:
-        st.markdown("""
-        <div class="search-card" style="text-align: center; padding: 3rem;">
-            <p style="font-size: 1.1rem; color: #94a3b8;">👆 Enter a question above to search your data</p>
-            <p style="font-size: 0.95rem; color: #64748b;">Try asking about revenue, sales by country, top brands, and more</p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        canned = get_canned_demo_sql(query, schema, dialect)
-        with st.spinner("Running query..." if canned else "Translating to SQL..."):
-            if canned:
-                sql = canned
-            else:
-                ck = sql_cache_key(query, schema, dialect)
-                sql = st.session_state.sql_cache.get(ck)
-                if sql is None:
-                    sql = (
-                        get_ollama_sql(query, schema, dialect=dialect, schema_text=schema_prompt_str)
-                        if use_ollama
-                        else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect, schema_text=schema_prompt_str)
-                    )
-                    if sql:
-                        sql_cache_set(st.session_state.sql_cache, ck, sql)
-        
-        if not sql:
-            st.error("Could not generate SQL. Try rephrasing your question.")
+        if not query:
+            st.session_state.pop("search_result_bundle", None)
+            st.markdown("""
+            <div class="search-card" style="text-align: center; padding: 3rem;">
+                <p style="font-size: 1.1rem; color: #94a3b8;">👆 Enter a question above to search your data</p>
+                <p style="font-size: 0.95rem; color: #64748b;">Try asking about revenue, sales by country, top brands, and more</p>
+            </div>
+            """, unsafe_allow_html=True)
         else:
-            ok_sql, sql_err = validate_readonly_sql(sql)
-            if not ok_sql:
-                st.warning(
-                    "That response is not a safe read-only query, or it does not match your data. "
-                    "Ask something about **your tables** — for example totals, trends, or top categories."
-                )
-                with st.expander("Technical details"):
-                    st.code(sql, language="sql")
-                    st.caption(sql_err)
+            bundle_ck = sql_cache_key(query, schema, dialect)
+            br = st.session_state.get("search_result_bundle")
+            use_bundle = (
+                br is not None
+                and br.get("key") == bundle_ck
+                and isinstance(br.get("df"), pd.DataFrame)
+                and br.get("sql")
+            )
+            if use_bundle:
+                sql = br["sql"]
+                df_result = br["df"]
+                canned = bool(br.get("canned", False))
             else:
-                try:
-                    df_result = pd.read_sql_query(sql, conn)
-                except sqlite3.OperationalError as e:
-                    st.error("The query could not run on your data. Try simpler wording or check column names in the sidebar.")
-                    with st.expander("Technical details"):
-                        st.code(sql, language="sql")
-                        st.write(str(e))
-                except sqlite3.ProgrammingError as e:
-                    st.error("The query structure was not valid for this database. Try a simpler question.")
-                    with st.expander("Technical details"):
-                        st.code(sql, language="sql")
-                        st.write(str(e))
-                except Exception as e:
-                    st.error("Something went wrong running the query. Try rephrasing or ask about columns shown in the sidebar.")
-                    with st.expander("Technical details"):
-                        st.code(sql, language="sql")
-                        st.caption(str(e))
+                canned = get_canned_demo_sql(query, schema, dialect)
+                with st.spinner("Running query..." if canned else "Translating to SQL..."):
+                    if canned:
+                        sql = canned
+                    else:
+                        sql = st.session_state.sql_cache.get(bundle_ck)
+                        if sql is None:
+                            sql = (
+                                get_ollama_sql(query, schema, dialect=dialect, schema_text=schema_prompt_str)
+                                if use_ollama
+                                else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect, schema_text=schema_prompt_str)
+                            )
+                            if sql:
+                                sql_cache_set(st.session_state.sql_cache, bundle_ck, sql)
+            
+            if not sql:
+                st.error("Could not generate SQL. Try rephrasing your question.")
+            else:
+                have_df = False
+                if use_bundle:
+                    have_df = True
                 else:
+                    ok_sql, sql_err = validate_readonly_sql(sql)
+                    if not ok_sql:
+                        st.warning(
+                            "That response is not a safe read-only query, or it does not match your data. "
+                            "Ask something about **your tables** — for example totals, trends, or top categories."
+                        )
+                        with st.expander("Technical details"):
+                            st.code(sql, language="sql")
+                            st.caption(sql_err)
+                    else:
+                        try:
+                            df_result = pd.read_sql_query(sql, conn)
+                        except sqlite3.OperationalError as e:
+                            st.error("The query could not run on your data. Try simpler wording or check column names in the sidebar.")
+                            with st.expander("Technical details"):
+                                st.code(sql, language="sql")
+                                st.write(str(e))
+                        except sqlite3.ProgrammingError as e:
+                            st.error("The query structure was not valid for this database. Try a simpler question.")
+                            with st.expander("Technical details"):
+                                st.code(sql, language="sql")
+                                st.write(str(e))
+                        except Exception as e:
+                            st.error("Something went wrong running the query. Try rephrasing or ask about columns shown in the sidebar.")
+                            with st.expander("Technical details"):
+                                st.code(sql, language="sql")
+                                st.caption(str(e))
+                        else:
+                            st.session_state.search_result_bundle = {
+                                "key": bundle_ck,
+                                "sql": sql,
+                                "df": df_result.copy(),
+                                "canned": canned,
+                            }
+                            have_df = True
+
+                if have_df:
                     if df_result.empty:
                         st.warning("No data found for that query.")
                         with st.expander("SQL"):
                             st.code(sql, language="sql")
                     else:
-                        st.session_state.query_history = (st.session_state.query_history + [query])[-10:]
+                        if not use_bundle:
+                            st.session_state.query_history = (st.session_state.query_history + [query])[-10:]
                         st.success("✅ Query executed successfully!")
                         with st.expander("🤖 How was this query written?", expanded=include_explanation):
                             if canned:
@@ -1090,7 +1192,12 @@ def main():
                                 except Exception:
                                     pass
                         with col2:
-                            chart_type = st.radio("Chart type", ["Auto", "Bar", "Line", "Donut", "Scatter"], horizontal=True, key="chart_type")
+                            chart_type = st.radio(
+                                "Chart type",
+                                ["Auto", "Bar", "Line", "Pie", "Donut", "Scatter"],
+                                horizontal=True,
+                                key="chart_type",
+                            )
                             ct = "auto" if chart_type == "Auto" else chart_type.lower()
                             fig = create_chart(df_result, query, ct)
                             if fig:
