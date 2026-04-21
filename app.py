@@ -29,12 +29,17 @@ def _is_streamlit_cloud() -> bool:
     return False
 
 
-# Bump when you ship — shown in footer if git hash unavailable (e.g. on Cloud)
-APP_BUILD_ID = "2026.02.18-3"
+# Bump this when you push to main so the Cloud footer matches the deploy (Cloud has no .git).
+APP_RELEASE = "8d1890f"
 
 
 def _footer_build_label() -> str:
-    """Git short SHA locally; fallback helps verify Cloud deploys picked up latest push."""
+    """Show a short revision: CI/env commit, local git, or APP_RELEASE on Cloud."""
+    for key in ("GITHUB_SHA", "COMMIT_SHA", "SOURCE_VERSION", "GIT_SHA"):
+        v = os.environ.get(key) or ""
+        v = v.strip()
+        if len(v) >= 7:
+            return v[:7]
     try:
         import subprocess
 
@@ -44,9 +49,11 @@ def _footer_build_label() -> str:
             stderr=subprocess.DEVNULL,
             timeout=3,
         ).decode().strip()
-        return h
+        if h:
+            return h
     except Exception:
-        return APP_BUILD_ID
+        pass
+    return APP_RELEASE
 
 
 # --- Page config ---
@@ -1388,7 +1395,15 @@ def main():
         <strong>DataQuery AI</strong> — Natural Language to SQL • Built with Streamlit & {ai_tech}
     </div>
     """, unsafe_allow_html=True)
-    st.caption(f"Build: {_footer_build_label()} — after a Git push, this should update once Streamlit Cloud redeploys.")
+    if _is_streamlit_cloud():
+        st.caption(
+            f"Build: {_footer_build_label()} — Cloud has no Git metadata; `APP_RELEASE` in `app.py` is bumped each deploy. "
+            "If the app still acts old: **Manage app → Reboot**, or confirm GitHub is connected to `main`."
+        )
+    else:
+        st.caption(
+            f"Build: {_footer_build_label()} — from Git locally; push `main` to update Streamlit Cloud."
+        )
 
 
 if __name__ == "__main__":
