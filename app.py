@@ -30,7 +30,7 @@ def _is_streamlit_cloud() -> bool:
 
 
 # Bump this when you push to main so the Cloud footer matches the deploy (Cloud has no .git).
-APP_RELEASE = "8d1890f"
+APP_RELEASE = "ef144d0"
 
 
 def _footer_build_label() -> str:
