@@ -18,19 +18,22 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 def _is_streamlit_cloud() -> bool:
-    """True when running on Streamlit Community Cloud (hide dev-only UI)."""
-    sm = os.environ.get("STREAMLIT_SHARING_MODE", "").lower()
+    """True when running on Streamlit Community Cloud / Snowflake (hide dev-only paths in UI)."""
+    e = os.environ
+    sm = (e.get("STREAMLIT_SHARING_MODE") or "").lower()
     if sm in ("true", "1"):
         return True
-    if os.environ.get("STREAMLIT_CLOUD", "").lower() in ("true", "1", "yes"):
+    if (e.get("STREAMLIT_CLOUD") or "").lower() in ("true", "1", "yes"):
         return True
-    if os.environ.get("DEPLOYMENT_PLATFORM", "").lower() == "streamlit_cloud":
+    if (e.get("DEPLOYMENT_PLATFORM") or "").lower() == "streamlit_cloud":
+        return True
+    if (e.get("STREAMLIT_SERVER_RUN_ON_SNOWFLAKE") or "").lower() in ("true", "1"):
         return True
     return False
 
 
 # Shown on Streamlit Cloud (no .git there). Bump when you ship meaningful changes.
-APP_RELEASE = "2026.04.21-4"
+APP_RELEASE = "2026.04.21-5"
 
 
 def _footer_build_label() -> str:
@@ -770,18 +773,22 @@ def main():
             key="gemini_manual_key",
         )
         manual_key = (manual_key or "").strip()
-        # Pasted key wins; otherwise use Streamlit secrets (local .streamlit/secrets.toml or Cloud dashboard).
+        # Pasted key wins; otherwise st.secrets (Cloud dashboard or local Streamlit config).
         api_key = manual_key or api_key_from_secrets
         if manual_key:
             pass  # visitor / you pasted a key — uses that quota only for this session
         elif api_key_from_secrets:
-            if on_cloud:
+            if _is_streamlit_cloud():
                 st.sidebar.caption(
                     "Using **GEMINI_API_KEY** from this app’s Streamlit secrets (your Cloud quota). "
                     "Paste a key above to use your own instead."
                 )
-            elif (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
-                st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev).")
+            else:
+                # Never mention file paths — a committed .streamlit folder can exist on Cloud too.
+                st.sidebar.caption(
+                    "Using saved **GEMINI_API_KEY** from this machine (local development). "
+                    "Paste a key above to override."
+                )
     else:
         api_key = ""
     
