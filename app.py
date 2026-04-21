@@ -30,7 +30,7 @@ def _is_streamlit_cloud() -> bool:
 
 
 # Shown on Streamlit Cloud (no .git there). Bump when you ship meaningful changes.
-APP_RELEASE = "2026.04.21-3"
+APP_RELEASE = "2026.04.21-4"
 
 
 def _footer_build_label() -> str:
@@ -828,7 +828,7 @@ def main():
 
         if st.session_state.get("query_history"):
             st.markdown("#### 📜 Recent queries")
-            st.caption("Tap a question to re-run it (last 10 this session).")
+            st.caption("Tap to re-run. Same list appears at the **bottom of AI Search** (big expander).")
             for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
                 label = q[:44] + ("..." if len(q) > 44 else "")
                 st.button(
@@ -1091,20 +1091,6 @@ def main():
                 if i < n_ex:
                     with cols[j]:
                         st.button(examples[i], key=f"chip_{i}", on_click=_set_query, args=(examples[i],), use_container_width=True)
-        if st.session_state.get("query_history"):
-            st.markdown("##### 📜 Your recent questions")
-            st.caption("Tap to load into the search box and run again (same session, last 10).")
-            qh_cols = st.columns(2)
-            for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
-                label = q[:36] + ("..." if len(q) > 36 else "")
-                with qh_cols[hi % 2]:
-                    st.button(
-                        label,
-                        key=f"main_qhist_{hi}",
-                        on_click=_history_rerun,
-                        args=(q,),
-                        use_container_width=True,
-                    )
         st.markdown("</div>", unsafe_allow_html=True)
         include_explanation = st.checkbox(
             "✨ **Why this SQL?** — Show AI reasoning for how this query works (one extra API call; great for analysts)",
@@ -1193,13 +1179,13 @@ def main():
                             have_df = True
 
                 if have_df:
+                    if not use_bundle:
+                        st.session_state.query_history = (st.session_state.query_history + [query])[-10:]
                     if df_result.empty:
                         st.warning("No data found for that query.")
                         with st.expander("SQL"):
                             st.code(sql, language="sql")
                     else:
-                        if not use_bundle:
-                            st.session_state.query_history = (st.session_state.query_history + [query])[-10:]
                         st.success("✅ Query executed successfully!")
                         with st.expander("🤖 How was this query written?", expanded=include_explanation):
                             if canned:
@@ -1248,6 +1234,30 @@ def main():
                                 st.info("Chart requires categorical and numeric columns.")
                         with st.expander("📊 Raw Data Explorer", expanded=False):
                             st.dataframe(df_result, use_container_width=True, height=300)
+
+        st.markdown("---")
+        with st.expander(
+            "📜 Session query history (re-run past questions)",
+            expanded=bool(st.session_state.get("query_history")),
+        ):
+            st.caption(
+                "Scroll here after you run searches — **last 10 questions** this session. "
+                "Tap a button to load the question and run it again."
+            )
+            if st.session_state.get("query_history"):
+                qh_cols = st.columns(2)
+                for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
+                    label = (q[:40] + "...") if len(q) > 40 else q
+                    with qh_cols[hi % 2]:
+                        st.button(
+                            label,
+                            key=f"main_qhist_{hi}",
+                            on_click=_history_rerun,
+                            args=(q,),
+                            use_container_width=True,
+                        )
+            else:
+                st.info("No history yet. Run a search above (even a canned “Popular question”) — then this list fills in.")
 
     with tab2:
         st.markdown("### 💬 Chat")
