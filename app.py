@@ -20,6 +20,26 @@ def _is_streamlit_cloud() -> bool:
     return os.environ.get("STREAMLIT_SHARING_MODE", "").lower() in ("true", "1")
 
 
+# Bump when you ship — shown in footer if git hash unavailable (e.g. on Cloud)
+APP_BUILD_ID = "2026.02.18-3"
+
+
+def _footer_build_label() -> str:
+    """Git short SHA locally; fallback helps verify Cloud deploys picked up latest push."""
+    try:
+        import subprocess
+
+        h = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(BASE_DIR),
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        ).decode().strip()
+        return h
+    except Exception:
+        return APP_BUILD_ID
+
+
 # --- Page config ---
 st.set_page_config(
     page_title="DataQuery AI | Natural Language Analytics",
@@ -1099,6 +1119,7 @@ def main():
         <strong>DataQuery AI</strong> — Natural Language to SQL • Built with Streamlit & {ai_tech}
     </div>
     """, unsafe_allow_html=True)
+    st.caption(f"Build: {_footer_build_label()} — after a Git push, this should update once Streamlit Cloud redeploys.")
 
 
 if __name__ == "__main__":
