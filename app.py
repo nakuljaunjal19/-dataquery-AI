@@ -3,6 +3,7 @@ DataQuery AI — Natural Language to SQL Analytics Platform
 Ask questions in plain English. Get instant insights from your data.
 """
 
+import os
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -12,6 +13,12 @@ from pathlib import Path
 from typing import Optional
 
 BASE_DIR = Path(__file__).resolve().parent
+
+
+def _is_streamlit_cloud() -> bool:
+    """Streamlit Community Cloud sets this when the app is deployed."""
+    return os.environ.get("STREAMLIT_SHARING_MODE", "").lower() in ("true", "1")
+
 
 # --- Page config ---
 st.set_page_config(
@@ -34,10 +41,10 @@ st.markdown("""
     
     .hero {
         background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 40%, #a855f7 100%);
-        padding: 2.8rem;
-        border-radius: 20px;
-        margin-bottom: 2rem;
-        box-shadow: 0 20px 60px -15px rgba(99, 102, 241, 0.4);
+        padding: 1.35rem 1.5rem 1.5rem;
+        border-radius: 16px;
+        margin-bottom: 1.25rem;
+        box-shadow: 0 12px 40px -12px rgba(99, 102, 241, 0.35);
         text-align: center;
         border: 1px solid rgba(255,255,255,0.08);
     }
@@ -45,19 +52,25 @@ st.markdown("""
         color: white !important;
         font-family: 'DM Sans', sans-serif !important;
         font-weight: 700 !important;
-        font-size: 2.4rem !important;
-        margin-bottom: 0.4rem !important;
+        font-size: 1.85rem !important;
+        margin-bottom: 0.25rem !important;
         letter-spacing: -0.02em !important;
     }
     .hero .tagline {
         color: rgba(255,255,255,0.92) !important;
-        font-size: 1.1rem !important;
+        font-size: 1rem !important;
         font-weight: 500 !important;
     }
+    .hero .hero-hint {
+        color: rgba(255,255,255,0.88) !important;
+        font-size: 0.92rem !important;
+        margin: 0.45rem 0 0.35rem !important;
+        line-height: 1.4 !important;
+    }
     .hero .sub {
-        color: rgba(255,255,255,0.7) !important;
-        font-size: 0.9rem !important;
-        margin-top: 0.3rem !important;
+        color: rgba(255,255,255,0.65) !important;
+        font-size: 0.82rem !important;
+        margin-top: 0.15rem !important;
     }
     
     .search-card {
@@ -147,6 +160,63 @@ def _sanitize_table_name(filename: str) -> str:
     """Convert filename to valid SQLite table name."""
     name = Path(filename).stem.lower().replace(" ", "_").replace("-", "_")
     return re.sub(r"[^a-z0-9_]", "", name) or "table"
+
+
+# Pre-validated SQL for suggestion buttons — matches demo `inventory` table (data.csv columns).
+# Used for SQLite + inventory so recruiters always get working results without LLM mistakes.
+DEMO_INVENTORY_SQL = {
+    "Top 10 brands by revenue": """
+SELECT brand, SUM(revenue_usd) AS total_revenue_usd
+FROM inventory
+GROUP BY brand
+ORDER BY total_revenue_usd DESC
+LIMIT 10
+""".strip(),
+    "Total sales by country": """
+SELECT country, SUM(revenue_usd) AS total_revenue_usd
+FROM inventory
+GROUP BY country
+ORDER BY total_revenue_usd DESC
+""".strip(),
+    "Average price by category": """
+SELECT category, AVG(final_price_usd) AS avg_price_usd
+FROM inventory
+GROUP BY category
+ORDER BY avg_price_usd DESC
+""".strip(),
+    "Units sold by payment method": """
+SELECT payment_method, SUM(units_sold) AS total_units_sold
+FROM inventory
+GROUP BY payment_method
+ORDER BY total_units_sold DESC
+""".strip(),
+    "Revenue by sales channel": """
+SELECT sales_channel, SUM(revenue_usd) AS total_revenue_usd
+FROM inventory
+GROUP BY sales_channel
+ORDER BY total_revenue_usd DESC
+""".strip(),
+}
+
+
+def get_canned_demo_sql(query: str, schema: dict, dialect: str) -> Optional[str]:
+    """Return exact SQL for known demo questions when inventory table exists (SQLite)."""
+    if dialect != "sqlite" or "inventory" not in schema:
+        return None
+    q = (query or "").strip()
+    if q not in DEMO_INVENTORY_SQL:
+        return None
+    cols = set(schema["inventory"])
+    need = {
+        "Top 10 brands by revenue": {"brand", "revenue_usd"},
+        "Total sales by country": {"country", "revenue_usd"},
+        "Average price by category": {"category", "final_price_usd"},
+        "Units sold by payment method": {"payment_method", "units_sold"},
+        "Revenue by sales channel": {"sales_channel", "revenue_usd"},
+    }
+    if not need[q].issubset(cols):
+        return None
+    return DEMO_INVENTORY_SQL[q]
 
 
 def build_database(uploaded_files: list, default_csv_path: Path, load_default_csv: bool = True) -> tuple:
@@ -522,23 +592,34 @@ def main():
     except Exception:
         api_key_from_secrets = ""
     
-    # Never show a key field when using Streamlit secrets (shared deploy) — key stays server-side only.
-    if api_key_from_secrets:
-        st.sidebar.caption("🔑 Gemini API key is configured in **app secrets** (not shown to visitors).")
-        api_key = api_key_from_secrets
-    else:
+    use_ollama = ai_backend == "Ollama (local)"
+    on_cloud = _is_streamlit_cloud()
+    
+    if not use_ollama:
+        st.sidebar.markdown(
+            "**Bring your own Gemini API key** — each visitor uses their own quota "
+            "(free tier at [Google AI Studio](https://aistudio.google.com/apikey))."
+        )
+        if on_cloud:
+            st.sidebar.caption(
+                "Public link: your key is not stored server-side for visitors. "
+                "Paste your key below to run queries — the app owner’s quota is not used."
+            )
         manual_key = st.sidebar.text_input(
-            "🔑 Gemini API Key (paste here)",
+            "🔑 Gemini API Key",
             value="",
             type="password",
-            placeholder="AIzaSy... (only for Gemini)",
-            help="Get free key at aistudio.google.com/apikey — for local use; on Streamlit Cloud add key to Secrets instead.",
+            placeholder="Paste your API key (starts with AIza...)",
+            help="Free key: aistudio.google.com/apikey — only used in your browser session.",
             key="gemini_manual_key",
         )
         manual_key = (manual_key or "").strip()
         api_key = manual_key
-    
-    use_ollama = ai_backend == "Ollama (local)"
+        if not on_cloud and not manual_key and api_key_from_secrets:
+            api_key = api_key_from_secrets
+            st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev).")
+    else:
+        api_key = ""
     
     if not use_ollama and not api_key:
         st.markdown("""
@@ -549,16 +630,16 @@ def main():
         </div>
         """, unsafe_allow_html=True)
         st.warning(
-            "⚠️ **Add a Gemini API key:** paste it in the sidebar (local), or set **GEMINI_API_KEY** in "
-            "Streamlit Cloud → App → Settings → Secrets (recommended for shared links)."
+            "⚠️ **Add your free Gemini API key** in the sidebar to get started. "
+            "Keys are not saved on the server — each session uses what you paste."
         )
         st.markdown("---")
         col1, col2 = st.columns([1, 1])
         with col1:
             st.markdown("**Don't have a key?**")
-            st.markdown("1. Get a free key from Google AI Studio")
-            st.markdown("2. Paste in the sidebar (local) or add to app Secrets (cloud)")
-            st.markdown("3. Start asking questions")
+            st.markdown("1. Open Google AI Studio (free)")
+            st.markdown("2. Create an API key")
+            st.markdown("3. Paste it in the sidebar under **Gemini API Key**")
         with col2:
             st.link_button("👉 Get API key (free)", "https://aistudio.google.com/apikey", type="primary")
         st.markdown("---")
@@ -570,7 +651,9 @@ def main():
 
     # --- Sidebar: File upload & schema ---
     with st.sidebar:
-        st.success("Ollama ✓ Unlimited" if use_ollama else "Gemini API connected ✓")
+        st.success("Ollama ✓ Unlimited" if use_ollama else "Gemini API ready ✓")
+        if not use_ollama:
+            st.caption("Powered by Gemini — heavy usage? Use your own key above (free tier limits apply).")
         include_explanation = st.checkbox(
             "Include AI explanation (uses extra API call)",
             value=False,
@@ -697,6 +780,7 @@ def main():
     <div class="hero">
         <h1>🔮 DataQuery AI</h1>
         <p class="tagline">Natural Language to SQL Analytics</p>
+        <p class="hero-hint">Upload your own CSV or use the sample dataset to get started.</p>
         <p class="sub">{table_count} dataset(s) loaded • Ask anything in plain English</p>
     </div>
     """, unsafe_allow_html=True)
@@ -814,8 +898,12 @@ def main():
         </div>
         """, unsafe_allow_html=True)
     else:
-        with st.spinner("Translating to SQL..."):
-            sql = get_ollama_sql(query, schema, dialect=dialect) if use_ollama else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect)
+        canned = get_canned_demo_sql(query, schema, dialect)
+        with st.spinner("Running query..." if canned else "Translating to SQL..."):
+            if canned:
+                sql = canned
+            else:
+                sql = get_ollama_sql(query, schema, dialect=dialect) if use_ollama else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect)
         
         if not sql:
             st.error("Could not generate SQL. Try rephrasing your question.")
@@ -845,7 +933,12 @@ def main():
                     st.session_state.query_history = (st.session_state.query_history + [query])[-5:]
                     st.success("✅ Query executed successfully!")
                     with st.expander("🤖 How was this query written?", expanded=include_explanation):
-                        if include_explanation:
+                        if canned:
+                            st.info(
+                                "This uses a **pre-validated SQL** statement for the demo `inventory` table "
+                                "(matches data.csv). No AI translation step — reliable for demos."
+                            )
+                        elif include_explanation:
                             with st.spinner("Explaining the solution..."):
                                 explanation = get_ollama_explanation(query, sql) if use_ollama else get_gemini_explanation(query, sql, df_result, api_key.strip())
                             if explanation:

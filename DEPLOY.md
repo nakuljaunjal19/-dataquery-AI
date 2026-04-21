@@ -28,14 +28,11 @@ git push -u origin main
    - **Branch:** `main`
    - **Main file path:** `app.py`
    - **App URL (optional):** e.g. `dataquery-ai` → `https://dataquery-ai.streamlit.app`
-4. Click **"Advanced settings"**
-5. Paste your secrets (replace with your actual Gemini key):
+4. Click **"Deploy"** (Secrets are optional — see below)
 
-```toml
-GEMINI_API_KEY = "your-key-here"
-```
+5. **API keys (recommended for public / resume links):** Do **not** put your personal `GEMINI_API_KEY` in Streamlit Secrets for a public app. Visitors **paste their own free key** in the sidebar so **your quota** is not used. Optional: leave Secrets empty for Gemini on Cloud.
 
-6. Click **"Deploy"**
+6. **Local development only:** You may add `GEMINI_API_KEY` to `.streamlit/secrets.toml` so you do not paste a key every run. That fallback is **disabled on Streamlit Cloud** — Cloud users always bring their own key.
 
 ### Demo dataset & shared links
 
@@ -52,7 +49,7 @@ The bundled **`data.csv`** in the repo is treated as a **demo / sample** dataset
 | Issue | Fix |
 |-------|-----|
 | "data.csv not found" | Ensure `data.csv` is committed and pushed to GitHub |
-| "Gemini API error" | Check GEMINI_API_KEY in Advanced settings → Secrets |
+| "Gemini API error" | Paste a valid key in the sidebar, or check quota at Google AI Studio |
 | App crashes on load | Try Python 3.10 or 3.11 in Advanced settings |
 | Slow first load | Expected — CSV loads on first run; subsequent loads are cached |
 
