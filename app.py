@@ -30,7 +30,7 @@ def _is_streamlit_cloud() -> bool:
 
 
 # Shown on Streamlit Cloud (no .git there). Bump when you ship meaningful changes.
-APP_RELEASE = "2026.04.21"
+APP_RELEASE = "2026.04.21-2"
 
 
 def _footer_build_label() -> str:
@@ -820,12 +820,7 @@ def main():
         st.success("Ollama ✓ Unlimited" if use_ollama else "Gemini API ready ✓")
         if not use_ollama:
             st.caption("Powered by Gemini — heavy usage? Use your own key above (free tier limits apply).")
-        st.markdown("##### ✨ Why this SQL?")
-        include_explanation = st.checkbox(
-            "Include AI explanation (how the query works — uses one extra API call)",
-            value=False,
-            help="Useful for analysts; turn off to save Gemini quota.",
-        )
+        st.caption("✨ **Why this SQL?** lives on **AI Search** (under the search box) — turn it on for analyst-friendly reasoning.")
         st.markdown("---")
         
         data_source = st.radio(
@@ -921,7 +916,9 @@ def main():
                 st.caption(", ".join(cols[:10]) + ("..." if len(cols) > 10 else ""))
         st.markdown("---")
         st.markdown("#### 📖 Data Dictionary")
-        st.caption("Descriptions are sent to the AI with your schema — improves filters and JOINs.")
+        st.caption(
+            "Plain-English column notes are **merged into prompts** to the AI (filters, JOINs, spelling of categories)."
+        )
         desc_rows = []
         for table, cols in schema.items():
             for col in cols:
@@ -959,8 +956,20 @@ def main():
         st.markdown("---")
         if "query_history" in st.session_state and st.session_state.query_history:
             st.markdown("#### 📜 Recent queries")
-            for q in st.session_state.query_history[-10:][::-1]:
-                st.caption(f"• {q[:48]}{'...' if len(q) > 48 else ''}")
+            st.caption("Tap to re-run (fills the search box).")
+
+            def _history_rerun(qtext):
+                st.session_state.pending_suggestion = qtext
+
+            for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
+                label = q[:44] + ("..." if len(q) > 44 else "")
+                st.button(
+                    label,
+                    key=f"qhist_btn_{hi}",
+                    on_click=_history_rerun,
+                    args=(q,),
+                    use_container_width=True,
+                )
         st.markdown("---")
         st.caption("💡 Ask in plain English. Use JOIN for related tables.")
     
@@ -1083,6 +1092,11 @@ def main():
                     with cols[j]:
                         st.button(examples[i], key=f"chip_{i}", on_click=_set_query, args=(examples[i],), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
+        include_explanation = st.checkbox(
+            "✨ **Why this SQL?** — Show AI reasoning for how this query works (one extra API call; great for analysts)",
+            key="include_explanation",
+            help="Uses Gemini or Ollama once per result to explain GROUP BY, filters, and joins in plain language.",
+        )
     
         if not query:
             st.session_state.pop("search_result_bundle", None)
@@ -1187,7 +1201,7 @@ def main():
                                 else:
                                     st.caption("Could not generate (check API quota). View the SQL below.")
                             else:
-                                st.caption("Turn on **Why this SQL? → Include AI explanation** in the sidebar for a plain-language walkthrough.")
+                                st.caption("Turn on **Why this SQL?** above the search box for a plain-language walkthrough.")
                         with st.expander("🔍 View generated SQL", expanded=False):
                             st.code(sql, language="sql")
                         col1, col2 = st.columns([1, 1])
@@ -1205,6 +1219,7 @@ def main():
                                 except Exception:
                                     pass
                         with col2:
+                            st.caption("Switch chart type **without re-running** the AI or SQL — uses cached results.")
                             chart_type = st.radio(
                                 "Chart type",
                                 ["Auto", "Bar", "Line", "Pie", "Donut", "Scatter"],
