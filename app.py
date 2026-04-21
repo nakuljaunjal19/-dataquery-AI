@@ -29,8 +29,8 @@ def _is_streamlit_cloud() -> bool:
     return False
 
 
-# Bump this when you push to main so the Cloud footer matches the deploy (Cloud has no .git).
-APP_RELEASE = "66865eb"
+# Shown on Streamlit Cloud (no .git there). Bump when you ship meaningful changes.
+APP_RELEASE = "2026.04.21"
 
 
 def _footer_build_label() -> str:
