@@ -30,7 +30,7 @@ def _is_streamlit_cloud() -> bool:
 
 
 # Shown on Streamlit Cloud (no .git there). Bump when you ship meaningful changes.
-APP_RELEASE = "2026.04.21-2"
+APP_RELEASE = "2026.04.21-3"
 
 
 def _footer_build_label() -> str:
@@ -815,6 +815,9 @@ def main():
     if "column_descriptions" not in st.session_state:
         st.session_state.column_descriptions = dict(DEFAULT_COLUMN_DESCRIPTIONS)
 
+    def _history_rerun(qtext: str):
+        st.session_state.pending_suggestion = qtext
+
     # --- Sidebar: File upload & schema ---
     with st.sidebar:
         st.success("Ollama ✓ Unlimited" if use_ollama else "Gemini API ready ✓")
@@ -822,6 +825,20 @@ def main():
             st.caption("Powered by Gemini — heavy usage? Use your own key above (free tier limits apply).")
         st.caption("✨ **Why this SQL?** lives on **AI Search** (under the search box) — turn it on for analyst-friendly reasoning.")
         st.markdown("---")
+
+        if st.session_state.get("query_history"):
+            st.markdown("#### 📜 Recent queries")
+            st.caption("Tap a question to re-run it (last 10 this session).")
+            for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
+                label = q[:44] + ("..." if len(q) > 44 else "")
+                st.button(
+                    label,
+                    key=f"sb_qhist_{hi}",
+                    on_click=_history_rerun,
+                    args=(q,),
+                    use_container_width=True,
+                )
+            st.markdown("---")
         
         data_source = st.radio(
             "Data source",
@@ -954,23 +971,6 @@ def main():
             else:
                 st.caption("No columns loaded.")
         st.markdown("---")
-        if "query_history" in st.session_state and st.session_state.query_history:
-            st.markdown("#### 📜 Recent queries")
-            st.caption("Tap to re-run (fills the search box).")
-
-            def _history_rerun(qtext):
-                st.session_state.pending_suggestion = qtext
-
-            for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
-                label = q[:44] + ("..." if len(q) > 44 else "")
-                st.button(
-                    label,
-                    key=f"qhist_btn_{hi}",
-                    on_click=_history_rerun,
-                    args=(q,),
-                    use_container_width=True,
-                )
-        st.markdown("---")
         st.caption("💡 Ask in plain English. Use JOIN for related tables.")
     
     table_count = len(schema)
@@ -1091,6 +1091,20 @@ def main():
                 if i < n_ex:
                     with cols[j]:
                         st.button(examples[i], key=f"chip_{i}", on_click=_set_query, args=(examples[i],), use_container_width=True)
+        if st.session_state.get("query_history"):
+            st.markdown("##### 📜 Your recent questions")
+            st.caption("Tap to load into the search box and run again (same session, last 10).")
+            qh_cols = st.columns(2)
+            for hi, q in enumerate(st.session_state.query_history[-10:][::-1]):
+                label = q[:36] + ("..." if len(q) > 36 else "")
+                with qh_cols[hi % 2]:
+                    st.button(
+                        label,
+                        key=f"main_qhist_{hi}",
+                        on_click=_history_rerun,
+                        args=(q,),
+                        use_container_width=True,
+                    )
         st.markdown("</div>", unsafe_allow_html=True)
         include_explanation = st.checkbox(
             "✨ **Why this SQL?** — Show AI reasoning for how this query works (one extra API call; great for analysts)",
