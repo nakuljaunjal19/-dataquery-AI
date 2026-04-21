@@ -3,6 +3,8 @@ DataQuery AI — Natural Language to SQL Analytics Platform
 Ask questions in plain English. Get instant insights from your data.
 """
 
+import hashlib
+import json
 import os
 import streamlit as st
 import sqlite3
@@ -10,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -59,47 +61,35 @@ st.markdown("""
     
     footer {visibility: hidden;}
     
-    .hero {
+    .hero-compact {
         background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 40%, #a855f7 100%);
-        padding: 1.35rem 1.5rem 1.5rem;
-        border-radius: 16px;
-        margin-bottom: 1.25rem;
-        box-shadow: 0 12px 40px -12px rgba(99, 102, 241, 0.35);
+        padding: 0.65rem 1rem;
+        border-radius: 12px;
+        margin-bottom: 0.75rem;
         text-align: center;
         border: 1px solid rgba(255,255,255,0.08);
     }
-    .hero h1 {
+    .hero-compact h1 {
         color: white !important;
         font-family: 'DM Sans', sans-serif !important;
         font-weight: 700 !important;
-        font-size: 1.85rem !important;
-        margin-bottom: 0.25rem !important;
+        font-size: 1.2rem !important;
+        margin: 0 !important;
         letter-spacing: -0.02em !important;
     }
-    .hero .tagline {
-        color: rgba(255,255,255,0.92) !important;
-        font-size: 1rem !important;
-        font-weight: 500 !important;
-    }
-    .hero .hero-hint {
+    .hero-compact .tagline {
         color: rgba(255,255,255,0.88) !important;
-        font-size: 0.92rem !important;
-        margin: 0.45rem 0 0.35rem !important;
-        line-height: 1.4 !important;
-    }
-    .hero .sub {
-        color: rgba(255,255,255,0.65) !important;
         font-size: 0.82rem !important;
-        margin-top: 0.15rem !important;
+        margin: 0.2rem 0 0 !important;
     }
     
     .search-card {
         background: rgba(30, 35, 50, 0.7);
         backdrop-filter: blur(16px);
         border: 1px solid rgba(99, 102, 241, 0.2);
-        padding: 2rem;
-        border-radius: 18px;
-        margin-bottom: 1.5rem;
+        padding: 1.1rem 1.25rem 1.25rem;
+        border-radius: 14px;
+        margin-bottom: 1rem;
         box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
     }
     .stTextInput > div > div > input {
@@ -239,6 +229,67 @@ def get_canned_demo_sql(query: str, schema: dict, dialect: str) -> Optional[str]
     return DEMO_INVENTORY_SQL[q]
 
 
+def build_schema_prompt_with_samples(schema: dict, conn) -> str:
+    """Schema plus sample values per column (helps LLMs with filters and categories)."""
+    parts = []
+    for table, cols in schema.items():
+        if not re.match(r"^[a-zA-Z0-9_]+$", table):
+            continue
+        parts.append(f"Table: {table}")
+        parts.append(f"Columns: {', '.join(cols)}")
+        try:
+            df_s = pd.read_sql_query(f"SELECT * FROM {table} LIMIT 5", conn)
+            for col in cols[:20]:
+                if col not in df_s.columns:
+                    continue
+                ser = df_s[col].dropna()
+                if ser.empty:
+                    continue
+                uniq = ser.unique()[:3]
+                samples = [str(x)[:50] for x in uniq]
+                parts.append(f"  Sample values for {col}: {', '.join(samples)}")
+        except Exception:
+            pass
+        parts.append("")
+    return "\n".join(parts).strip()
+
+
+def validate_readonly_sql(sql: str) -> Tuple[bool, str]:
+    """Reject non-SELECT and dangerous keywords before execution."""
+    if not sql or not str(sql).strip():
+        return False, "Empty query."
+    s = str(sql).strip()
+    if ";" in s:
+        s = s.split(";")[0].strip()
+    upper = s.upper()
+    if not (upper.startswith("SELECT") or upper.startswith("WITH")):
+        return False, "Only read-only SELECT queries are allowed."
+    if re.search(
+        r"\b(DROP|DELETE|INSERT|UPDATE|ALTER|TRUNCATE|CREATE|ATTACH|EXEC|EXECUTE|PRAGMA|REPLACE|GRANT|REVOKE)\b",
+        upper,
+    ):
+        return False, "Blocked unsafe SQL keyword."
+    return True, ""
+
+
+def sql_cache_key(question: str, schema: dict, dialect: str, extra: str = "") -> str:
+    h = hashlib.sha256(
+        f"{question.strip().lower()}|{dialect}|{json.dumps(schema, sort_keys=True)}|{extra}".encode()
+    ).hexdigest()[:32]
+    return h
+
+
+_SQL_CACHE_MAX = 40
+
+
+def sql_cache_set(cache: dict, key: str, sql: str) -> None:
+    if key in cache:
+        del cache[key]
+    cache[key] = sql
+    while len(cache) > _SQL_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+
+
 def build_database(uploaded_files: list, default_csv_path: Path, load_default_csv: bool = True) -> tuple:
     """
     Build SQLite DB from default CSV + uploaded files.
@@ -349,14 +400,22 @@ def _dialect_hints(dialect: str, today: str) -> str:
     return f"- Dialect: SQLite. Date columns: YYYY-MM-DD text. Today is {today}. For last 30 days: date(column) >= date('now', '-30 days')"
 
 
-def get_ollama_sql(question: str, schema: dict, model: str = "llama3.2", base_url: str = "http://localhost:11434", chat_history: list = None, dialect: str = "sqlite") -> Optional[str]:
+def get_ollama_sql(
+    question: str,
+    schema: dict,
+    model: str = "llama3.2",
+    base_url: str = "http://localhost:11434",
+    chat_history: list = None,
+    dialect: str = "sqlite",
+    schema_text: Optional[str] = None,
+) -> Optional[str]:
     """Use local Ollama to translate natural language to SQL."""
     from datetime import date
     today = date.today().isoformat()
-    schema_str = "\n".join(f"Table: {t}\nColumns: {cols}" for t, cols in schema.items())
+    schema_str = schema_text or "\n".join(f"Table: {t}\nColumns: {cols}" for t, cols in schema.items())
     context = ""
     if chat_history:
-        context = "Previous Q&A:\n" + "\n".join(f"Q: {q}\nA: {s}" for q, s in chat_history[-3:]) + "\n\n"
+        context = "Previous Q&A:\n" + "\n".join(f"Q: {q}\nA: {s}" for q, s in chat_history[-6:]) + "\n\n"
     hints = _dialect_hints(dialect, today)
     prompt = f"""You are an expert SQL assistant.
 Schema:
@@ -379,18 +438,32 @@ Question: {question}"""
         sql = re.sub(r"\s*```$", "", sql)
         return sql.strip() if sql else None
     except Exception as e:
-        st.error(f"Ollama error: {e}. Is Ollama running? Try: ollama serve")
+        err = str(e).lower()
+        if "refused" in err or "10061" in err or "timed out" in err or "failed to establish" in err:
+            st.error(
+                "**Ollama not reachable** — Start it with `ollama serve`, then run `ollama pull llama3.2`. "
+                "Or switch to **Gemini (cloud)** in the sidebar and add your API key."
+            )
+        else:
+            st.error(f"Ollama error: {e}. Check that Ollama is running on {base_url}")
         return None
 
 
-def get_gemini_sql(question: str, schema: dict, api_key: str, chat_history: list = None, dialect: str = "sqlite") -> Optional[str]:
+def get_gemini_sql(
+    question: str,
+    schema: dict,
+    api_key: str,
+    chat_history: list = None,
+    dialect: str = "sqlite",
+    schema_text: Optional[str] = None,
+) -> Optional[str]:
     """Use Gemini to translate natural language to SQL."""
     from datetime import date
     today = date.today().isoformat()  # YYYY-MM-DD
-    schema_str = "\n".join(f"Table: {t}\nColumns: {cols}" for t, cols in schema.items())
+    schema_str = schema_text or "\n".join(f"Table: {t}\nColumns: {cols}" for t, cols in schema.items())
     context = ""
     if chat_history:
-        context = "Previous Q&A:\n" + "\n".join(f"Q: {q}\nA: {s}" for q, s in chat_history[-3:]) + "\n\n"
+        context = "Previous Q&A:\n" + "\n".join(f"Q: {q}\nA: {s}" for q, s in chat_history[-6:]) + "\n\n"
     hints = _dialect_hints(dialect, today)
     prompt = f"""You are an expert SQL assistant.
 Schema:
@@ -429,10 +502,20 @@ Question: {question}"""
             st.error(f"Gemini API error ({e.code}): {err_body[:200]}")
             return None
         except Exception as e:
-            st.error(f"Gemini API error: {e}")
+            st.error(
+                "Gemini could not translate that into SQL. Check your API key and network, "
+                "or ask about your loaded tables (e.g. revenue, top products)."
+            )
+            with st.expander("Technical details"):
+                st.caption(str(e))
             return None
     except Exception as e:
-        st.error(f"Gemini API error: {e}")
+        st.error(
+            "Gemini could not translate that into SQL. Check your API key and network, "
+            "or ask a question about your loaded tables (e.g. revenue, top products)."
+        )
+        with st.expander("Technical details"):
+            st.caption(str(e))
         return None
     
     # Clean common AI wrap-around
@@ -676,10 +759,11 @@ def main():
         st.success("Ollama ✓ Unlimited" if use_ollama else "Gemini API ready ✓")
         if not use_ollama:
             st.caption("Powered by Gemini — heavy usage? Use your own key above (free tier limits apply).")
+        st.markdown("##### ✨ Why this SQL?")
         include_explanation = st.checkbox(
-            "Include AI explanation (uses extra API call)",
+            "Include AI explanation (how the query works — uses one extra API call)",
             value=False,
-            help="Turn OFF to save quota—search works without it"
+            help="Useful for analysts; turn off to save Gemini quota.",
         )
         st.markdown("---")
         
@@ -791,22 +875,12 @@ def main():
         st.markdown("---")
         if "query_history" in st.session_state and st.session_state.query_history:
             st.markdown("#### 📜 Recent queries")
-            for q in st.session_state.query_history[-5:][::-1]:
-                st.caption(f"• {q[:40]}{'...' if len(q) > 40 else ''}")
+            for q in st.session_state.query_history[-10:][::-1]:
+                st.caption(f"• {q[:48]}{'...' if len(q) > 48 else ''}")
         st.markdown("---")
         st.caption("💡 Ask in plain English. Use JOIN for related tables.")
     
-    # --- Hero section ---
     table_count = len(schema)
-    st.markdown(f"""
-    <div class="hero">
-        <h1>🔮 DataQuery AI</h1>
-        <p class="tagline">Natural Language to SQL Analytics</p>
-        <p class="hero-hint">Upload your own CSV or use the sample dataset to get started.</p>
-        <p class="sub">{table_count} dataset(s) loaded • Ask anything in plain English</p>
-    </div>
-    """, unsafe_allow_html=True)
-
     total_rows = 0
     try:
         for t in schema:
@@ -814,9 +888,11 @@ def main():
             total_rows += int(r["c"].iloc[0])
     except Exception:
         pass
-    st.caption(f"📂 {table_count} dataset(s) • {total_rows:,} rows")
-    st.markdown("")
-    
+
+    schema_prompt_str = build_schema_prompt_with_samples(schema, conn)
+    if "sql_cache" not in st.session_state:
+        st.session_state.sql_cache = {}
+
     # --- Tabbed interface ---
     tab1, tab2, tab3, tab4 = st.tabs(["🔍 AI Search", "💬 Chat", "✏️ SQL Editor", "📈 Data Trends"])
 
@@ -848,19 +924,27 @@ def main():
         del st.session_state.pending_suggestion
 
     with tab1:
+        st.markdown(f"""
+        <div class="hero-compact">
+            <h1>🔮 DataQuery AI</h1>
+            <p class="tagline">Natural Language to SQL • {table_count} table(s) • {total_rows:,} rows</p>
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption("Upload your own CSV or use the sample dataset — then type a question below.")
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
-        cq, cv = st.columns([6, 1])
+        st.caption("**Search** — ask in plain English. **Voice** — click 🎤 to speak your question (Chrome / Edge).")
+        cq, cv = st.columns([5, 1])
         with cq:
             query = st.text_input(
                 "Ask a question",
-                placeholder="e.g., What are the top 10 brands by total revenue?",
+                placeholder="e.g., Top brands by revenue, or sales by country",
                 label_visibility="collapsed",
                 key="search_query"
             )
         with cv:
             st.markdown("<br>", unsafe_allow_html=True)
-            with st.expander("🎤 Voice"):
-                st.caption("Speak your question")
+            with st.expander("🎤 Voice input"):
+                st.caption("Speak your question — it fills the search box")
                 st.components.v1.html("""
                 <button id="vbtn" style="padding:8px 16px;border-radius:8px;background:#6366f1;color:white;border:none;cursor:pointer;">
                     Start speaking
@@ -896,7 +980,7 @@ def main():
         ]
         if len(schema) > 1:
             examples.append("Combine data from multiple tables")
-        st.caption("Try (click to fill search box):")
+        st.caption("**Popular questions:** (tap to run)")
 
         def _set_query(q):
             st.session_state.pending_suggestion = q
@@ -925,76 +1009,96 @@ def main():
             if canned:
                 sql = canned
             else:
-                sql = get_ollama_sql(query, schema, dialect=dialect) if use_ollama else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect)
+                ck = sql_cache_key(query, schema, dialect)
+                sql = st.session_state.sql_cache.get(ck)
+                if sql is None:
+                    sql = (
+                        get_ollama_sql(query, schema, dialect=dialect, schema_text=schema_prompt_str)
+                        if use_ollama
+                        else get_gemini_sql(query, schema, api_key.strip(), dialect=dialect, schema_text=schema_prompt_str)
+                    )
+                    if sql:
+                        sql_cache_set(st.session_state.sql_cache, ck, sql)
         
         if not sql:
             st.error("Could not generate SQL. Try rephrasing your question.")
         else:
-            try:
-                df_result = pd.read_sql_query(sql, conn)
-            except sqlite3.OperationalError as e:
-                st.error("⚠️ **SQL Error:** The generated query had a problem. Try rephrasing.")
+            ok_sql, sql_err = validate_readonly_sql(sql)
+            if not ok_sql:
+                st.warning(
+                    "That response is not a safe read-only query, or it does not match your data. "
+                    "Ask something about **your tables** — for example totals, trends, or top categories."
+                )
                 with st.expander("Technical details"):
                     st.code(sql, language="sql")
-                    st.write(str(e))
-            except sqlite3.ProgrammingError as e:
-                st.error("⚠️ **SQL Error:** Invalid query structure. Try a simpler question.")
-                with st.expander("Technical details"):
-                    st.code(sql, language="sql")
-                    st.write(str(e))
-            except Exception as e:
-                st.error(f"⚠️ **Unexpected error:** {e}")
-                with st.expander("Technical details"):
-                    st.code(sql, language="sql")
+                    st.caption(sql_err)
             else:
-                if df_result.empty:
-                    st.warning("No data found for that query.")
-                    with st.expander("SQL"):
+                try:
+                    df_result = pd.read_sql_query(sql, conn)
+                except sqlite3.OperationalError as e:
+                    st.error("The query could not run on your data. Try simpler wording or check column names in the sidebar.")
+                    with st.expander("Technical details"):
                         st.code(sql, language="sql")
+                        st.write(str(e))
+                except sqlite3.ProgrammingError as e:
+                    st.error("The query structure was not valid for this database. Try a simpler question.")
+                    with st.expander("Technical details"):
+                        st.code(sql, language="sql")
+                        st.write(str(e))
+                except Exception as e:
+                    st.error("Something went wrong running the query. Try rephrasing or ask about columns shown in the sidebar.")
+                    with st.expander("Technical details"):
+                        st.code(sql, language="sql")
+                        st.caption(str(e))
                 else:
-                    st.session_state.query_history = (st.session_state.query_history + [query])[-5:]
-                    st.success("✅ Query executed successfully!")
-                    with st.expander("🤖 How was this query written?", expanded=include_explanation):
-                        if canned:
-                            st.info(
-                                "This uses a **pre-validated SQL** statement for the demo `inventory` table "
-                                "(matches data.csv). No AI translation step — reliable for demos."
-                            )
-                        elif include_explanation:
-                            with st.spinner("Explaining the solution..."):
-                                explanation = get_ollama_explanation(query, sql) if use_ollama else get_gemini_explanation(query, sql, df_result, api_key.strip())
-                            if explanation:
-                                st.info(explanation)
+                    if df_result.empty:
+                        st.warning("No data found for that query.")
+                        with st.expander("SQL"):
+                            st.code(sql, language="sql")
+                    else:
+                        st.session_state.query_history = (st.session_state.query_history + [query])[-10:]
+                        st.success("✅ Query executed successfully!")
+                        with st.expander("🤖 How was this query written?", expanded=include_explanation):
+                            if canned:
+                                st.info(
+                                    "This uses a **pre-validated SQL** statement for the demo `inventory` table "
+                                    "(matches data.csv). No AI translation step — reliable for demos."
+                                )
+                            elif include_explanation:
+                                with st.spinner("Explaining the solution..."):
+                                    explanation = get_ollama_explanation(query, sql) if use_ollama else get_gemini_explanation(query, sql, df_result, api_key.strip())
+                                if explanation:
+                                    st.info(explanation)
+                                else:
+                                    st.caption("Could not generate (check API quota). View the SQL below.")
                             else:
-                                st.caption("Could not generate (check API quota). View the SQL below.")
-                        else:
-                            st.caption("Enable **Include AI explanation** in the sidebar to get a plain-language explanation of how the query works.")
-                    with st.expander("🔍 View generated SQL", expanded=False):
-                        st.code(sql, language="sql")
-                    col1, col2 = st.columns([1, 1])
-                    with col1:
-                        st.markdown("### 📋 Results Table")
-                        st.dataframe(df_result, use_container_width=True, height=400)
-                        d1, d2 = st.columns(2)
-                        with d1:
-                            csv = df_result.to_csv(index=False).encode("utf-8")
-                            st.download_button("📥 CSV", csv, "results.csv", "text/csv", use_container_width=True)
-                        with d2:
-                            try:
-                                pdf_bytes = export_to_pdf(df_result, query)
-                                st.download_button("📥 PDF Report", pdf_bytes, "report.pdf", "application/pdf", use_container_width=True)
-                            except Exception:
-                                pass
-                    with col2:
-                        chart_type = st.radio("Chart type", ["Auto", "Bar", "Line", "Donut", "Scatter"], horizontal=True, key="chart_type")
-                        ct = "auto" if chart_type == "Auto" else chart_type.lower()
-                        fig = create_chart(df_result, query, ct)
-                        if fig:
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("Chart requires categorical and numeric columns.")
-                    with st.expander("📊 Raw Data Explorer", expanded=False):
-                        st.dataframe(df_result, use_container_width=True, height=300)
+                                st.caption("Turn on **Why this SQL? → Include AI explanation** in the sidebar for a plain-language walkthrough.")
+                        with st.expander("🔍 View generated SQL", expanded=False):
+                            st.code(sql, language="sql")
+                        col1, col2 = st.columns([1, 1])
+                        with col1:
+                            st.markdown("### 📋 Results Table")
+                            st.dataframe(df_result, use_container_width=True, height=400)
+                            d1, d2 = st.columns(2)
+                            with d1:
+                                csv = df_result.to_csv(index=False).encode("utf-8")
+                                st.download_button("📥 CSV", csv, "results.csv", "text/csv", use_container_width=True)
+                            with d2:
+                                try:
+                                    pdf_bytes = export_to_pdf(df_result, query)
+                                    st.download_button("📥 PDF Report", pdf_bytes, "report.pdf", "application/pdf", use_container_width=True)
+                                except Exception:
+                                    pass
+                        with col2:
+                            chart_type = st.radio("Chart type", ["Auto", "Bar", "Line", "Donut", "Scatter"], horizontal=True, key="chart_type")
+                            ct = "auto" if chart_type == "Auto" else chart_type.lower()
+                            fig = create_chart(df_result, query, ct)
+                            if fig:
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.info("Chart requires categorical and numeric columns.")
+                        with st.expander("📊 Raw Data Explorer", expanded=False):
+                            st.dataframe(df_result, use_container_width=True, height=300)
 
     with tab2:
         st.markdown("### 💬 Chat")
@@ -1040,26 +1144,68 @@ def main():
         if chat_input:
             st.session_state.chat_messages.append({"role": "user", "content": chat_input})
             with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+                with st.spinner("Translating to SQL..."):
                     hist = st.session_state.chat_history
-                    sql = get_ollama_sql(chat_input, schema, chat_history=hist, dialect=dialect) if use_ollama else get_gemini_sql(chat_input, schema, api_key.strip(), chat_history=hist, dialect=dialect)
+                    hist_ctx = json.dumps(hist[-6:], default=str)
+                    ck_chat = sql_cache_key(chat_input, schema, dialect, extra=hist_ctx)
+                    sql = st.session_state.sql_cache.get(ck_chat)
+                    if sql is None:
+                        sql = (
+                            get_ollama_sql(
+                                chat_input,
+                                schema,
+                                chat_history=hist,
+                                dialect=dialect,
+                                schema_text=schema_prompt_str,
+                            )
+                            if use_ollama
+                            else get_gemini_sql(
+                                chat_input,
+                                schema,
+                                api_key.strip(),
+                                chat_history=hist,
+                                dialect=dialect,
+                                schema_text=schema_prompt_str,
+                            )
+                        )
+                        if sql:
+                            sql_cache_set(st.session_state.sql_cache, ck_chat, sql)
                 if not sql:
-                    st.error("Could not generate SQL. Try rephrasing.")
+                    st.error("Could not generate SQL. Try rephrasing or ask about your tables.")
                     st.session_state.chat_messages.append({"role": "assistant", "content": "I couldn't translate that to SQL. Try rephrasing.", "df": None, "sql": None})
                 else:
-                    try:
-                        df_chat = pd.read_sql_query(sql, conn)
-                        if df_chat.empty:
-                            st.warning("No data found.")
-                            resp = "No rows matched your question."
-                        else:
-                            st.success(f"✅ {len(df_chat)} rows")
-                            resp = f"Found {len(df_chat)} rows."
-                        st.session_state.chat_history.append((chat_input, sql))
-                        st.session_state.chat_messages.append({"role": "assistant", "content": resp, "df": df_chat, "sql": sql})
-                    except Exception as e:
-                        st.error(f"SQL error: {e}")
-                        st.session_state.chat_messages.append({"role": "assistant", "content": str(e), "df": None, "sql": sql})
+                    ok_sql, sql_err = validate_readonly_sql(sql)
+                    if not ok_sql:
+                        st.warning(
+                            "That is not a safe read-only query for your data. "
+                            "Ask follow-ups about your tables, or switch to the Search tab."
+                        )
+                        with st.expander("Technical details"):
+                            st.code(sql, language="sql")
+                            st.caption(sql_err)
+                        st.session_state.chat_messages.append(
+                            {"role": "assistant", "content": "I could not run that as a safe query. Try asking about your data columns.", "df": None, "sql": sql}
+                        )
+                    else:
+                        try:
+                            df_chat = pd.read_sql_query(sql, conn)
+                            if df_chat.empty:
+                                st.warning("No data found.")
+                                resp = "No rows matched your question."
+                            else:
+                                st.success(f"✅ {len(df_chat)} rows")
+                                resp = f"Found {len(df_chat)} rows."
+                            st.session_state.chat_history.append((chat_input, sql))
+                            st.session_state.chat_history = st.session_state.chat_history[-6:]
+                            st.session_state.chat_messages.append({"role": "assistant", "content": resp, "df": df_chat, "sql": sql})
+                        except Exception as e:
+                            st.error("The query could not run. Try simpler wording or check your column names.")
+                            with st.expander("Technical details"):
+                                st.code(sql, language="sql")
+                                st.caption(str(e))
+                            st.session_state.chat_messages.append(
+                                {"role": "assistant", "content": "The query failed to run. Try rephrasing.", "df": None, "sql": sql}
+                            )
             if "chat_text" in st.session_state:
                 st.session_state.chat_text = ""
             st.rerun()
@@ -1077,17 +1223,27 @@ def main():
         sql_raw = st.text_area("Enter SQL", placeholder=ph, height=120, key="sql_editor")
         if st.button("Run SQL", type="primary", key="run_sql"):
             if sql_raw.strip():
-                try:
-                    df_sql = pd.read_sql_query(sql_raw.strip(), conn)
-                    st.success(f"✅ {len(df_sql)} rows")
-                    st.dataframe(df_sql, use_container_width=True, height=350)
-                    fig = create_chart(df_sql, "SQL Result", "auto")
-                    if fig:
-                        st.plotly_chart(fig, use_container_width=True)
-                except sqlite3.OperationalError as e:
-                    st.error(f"SQL Error: {e}")
-                except Exception as e:
-                    st.error(str(e))
+                ok_raw, raw_err = validate_readonly_sql(sql_raw.strip())
+                if not ok_raw:
+                    st.warning("Only read-only **SELECT** queries are allowed here (no INSERT/UPDATE/DELETE).")
+                    with st.expander("Technical details"):
+                        st.caption(raw_err)
+                else:
+                    try:
+                        df_sql = pd.read_sql_query(sql_raw.strip(), conn)
+                        st.success(f"✅ {len(df_sql)} rows")
+                        st.dataframe(df_sql, use_container_width=True, height=350)
+                        fig = create_chart(df_sql, "SQL Result", "auto")
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+                    except sqlite3.OperationalError as e:
+                        st.error("SQL could not run. Check table and column names.")
+                        with st.expander("Technical details"):
+                            st.caption(str(e))
+                    except Exception as e:
+                        st.error("Could not run that query.")
+                        with st.expander("Technical details"):
+                            st.caption(str(e))
             else:
                 st.warning("Enter a SQL query.")
 
