@@ -617,7 +617,9 @@ def main():
         api_key = manual_key
         if not on_cloud and not manual_key and api_key_from_secrets:
             api_key = api_key_from_secrets
-            st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev).")
+            # Dev-only hint: never show on Cloud (no secrets.toml in deploy); avoids confusing recruiters.
+            if (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
+                st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev only).")
     else:
         api_key = ""
     
