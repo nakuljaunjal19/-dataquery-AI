@@ -761,8 +761,8 @@ def main():
         )
         if on_cloud:
             st.sidebar.caption(
-                "Public link: your key is not stored server-side for visitors. "
-                "Paste your key below to run queries — the app owner’s quota is not used."
+                "**Keys:** If the app owner added `GEMINI_API_KEY` in Streamlit Cloud secrets, you can leave the box empty. "
+                "Otherwise paste your own key once per browser session — it stays until you close the tab."
             )
         manual_key = st.sidebar.text_input(
             "🔑 Gemini API Key",
@@ -1441,15 +1441,11 @@ def main():
         <strong>DataQuery AI</strong> — Natural Language to SQL • Built with Streamlit & {ai_tech}
     </div>
     """, unsafe_allow_html=True)
+    # Short line only — long “how to deploy” text read like an error to users.
     if _is_streamlit_cloud():
-        st.caption(
-            f"Build: {_footer_build_label()} — Cloud has no Git metadata; `APP_RELEASE` in `app.py` is bumped each deploy. "
-            "If the app still acts old: **Manage app → Reboot**, or confirm GitHub is connected to `main`."
-        )
+        st.caption(f"Build {_footer_build_label()}")
     else:
-        st.caption(
-            f"Build: {_footer_build_label()} — from Git locally; push `main` to update Streamlit Cloud."
-        )
+        st.caption(f"Running on your machine • build {_footer_build_label()}")
 
 
 if __name__ == "__main__":
