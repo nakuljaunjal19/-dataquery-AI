@@ -763,12 +763,18 @@ def main():
             key="gemini_manual_key",
         )
         manual_key = (manual_key or "").strip()
-        api_key = manual_key
-        if not on_cloud and not manual_key and api_key_from_secrets:
-            api_key = api_key_from_secrets
-            # Dev-only: never on Streamlit Cloud (recruiters don't need implementation details).
-            if not _is_streamlit_cloud() and (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
-                st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev only).")
+        # Pasted key wins; otherwise use Streamlit secrets (local .streamlit/secrets.toml or Cloud dashboard).
+        api_key = manual_key or api_key_from_secrets
+        if manual_key:
+            pass  # visitor / you pasted a key — uses that quota only for this session
+        elif api_key_from_secrets:
+            if on_cloud:
+                st.sidebar.caption(
+                    "Using **GEMINI_API_KEY** from this app’s Streamlit secrets (your Cloud quota). "
+                    "Paste a key above to use your own instead."
+                )
+            elif (BASE_DIR / ".streamlit" / "secrets.toml").is_file():
+                st.sidebar.caption("Using **GEMINI_API_KEY** from `.streamlit/secrets.toml` (local dev).")
     else:
         api_key = ""
     
