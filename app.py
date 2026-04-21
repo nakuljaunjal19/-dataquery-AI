@@ -149,17 +149,18 @@ def _sanitize_table_name(filename: str) -> str:
     return re.sub(r"[^a-z0-9_]", "", name) or "table"
 
 
-def build_database(uploaded_files: list, default_csv_path: Path) -> tuple:
+def build_database(uploaded_files: list, default_csv_path: Path, load_default_csv: bool = True) -> tuple:
     """
     Build SQLite DB from default CSV + uploaded files.
     Returns (conn, schema_dict, dialect) where schema_dict = {table_name: [columns]}.
     dialect = "sqlite" for prompt tuning.
+    If load_default_csv is False, bundled demo data.csv is skipped (user chose uploads only).
     """
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     schema = {}
     
-    # 1. Load default data.csv if it exists
-    if default_csv_path.exists():
+    # 1. Load demo data.csv if present (labeled as demo in UI; table name stays "inventory" for queries)
+    if load_default_csv and default_csv_path.exists():
         try:
             df = pd.read_csv(default_csv_path)
             df.to_sql("inventory", conn, if_exists="replace", index=False)
@@ -516,21 +517,26 @@ def main():
         st.markdown("### ⚙️ Settings")
         ai_backend = st.radio("AI Backend", ["Gemini (cloud)", "Ollama (local)"], horizontal=True, help="Ollama = unlimited, no API key")
     
-    DEFAULT_API_KEY = "AIzaSyDln3XxBplN8kuEb3rU3f8Xut_D28coCMo"
     try:
         api_key_from_secrets = (st.secrets.get("GEMINI_API_KEY", "") or "").strip()
     except Exception:
         api_key_from_secrets = ""
     
-    manual_key = st.sidebar.text_input(
-        "🔑 Gemini API Key (paste here)",
-        value="",
-        type="password",
-        placeholder="AIzaSy... (only for Gemini)",
-        help="Get free key at aistudio.google.com/apikey"
-    )
-    manual_key = (manual_key or "").strip()
-    api_key = manual_key or api_key_from_secrets or DEFAULT_API_KEY
+    # Never show a key field when using Streamlit secrets (shared deploy) — key stays server-side only.
+    if api_key_from_secrets:
+        st.sidebar.caption("🔑 Gemini API key is configured in **app secrets** (not shown to visitors).")
+        api_key = api_key_from_secrets
+    else:
+        manual_key = st.sidebar.text_input(
+            "🔑 Gemini API Key (paste here)",
+            value="",
+            type="password",
+            placeholder="AIzaSy... (only for Gemini)",
+            help="Get free key at aistudio.google.com/apikey — for local use; on Streamlit Cloud add key to Secrets instead.",
+            key="gemini_manual_key",
+        )
+        manual_key = (manual_key or "").strip()
+        api_key = manual_key
     
     use_ollama = ai_backend == "Ollama (local)"
     
@@ -542,13 +548,16 @@ def main():
             <p class="sub">Connect your API key to get started</p>
         </div>
         """, unsafe_allow_html=True)
-        st.warning("⚠️ **Paste your API key in the sidebar** (left) → in the box labeled **Gemini API Key**")
+        st.warning(
+            "⚠️ **Add a Gemini API key:** paste it in the sidebar (local), or set **GEMINI_API_KEY** in "
+            "Streamlit Cloud → App → Settings → Secrets (recommended for shared links)."
+        )
         st.markdown("---")
         col1, col2 = st.columns([1, 1])
         with col1:
             st.markdown("**Don't have a key?**")
             st.markdown("1. Get a free key from Google AI Studio")
-            st.markdown("2. Paste it in the sidebar")
+            st.markdown("2. Paste in the sidebar (local) or add to app Secrets (cloud)")
             st.markdown("3. Start asking questions")
         with col2:
             st.link_button("👉 Get API key (free)", "https://aistudio.google.com/apikey", type="primary")
@@ -581,7 +590,22 @@ def main():
         
         if data_source == "Upload CSV files":
             st.markdown("#### 📁 Upload datasets")
-            st.caption("data.csv loads by default. Add more CSVs below.")
+            demo_path = BASE_DIR / "data.csv"
+            has_demo = demo_path.exists()
+            if has_demo:
+                st.caption(
+                    "**Demo dataset:** `data.csv` is a sample so anyone can try the app. "
+                    "Upload your own CSV below to add tables or analyze your data."
+                )
+                use_demo = st.checkbox(
+                    "Include demo dataset (sample sales data)",
+                    value=True,
+                    key="use_demo_data",
+                    help="Uncheck to use only your uploaded files (no bundled sample).",
+                )
+            else:
+                use_demo = False
+                st.caption("Upload one or more CSV files. Each file becomes a queryable table.")
             uploaded = st.file_uploader(
                 "Add CSV files",
                 type=["csv"],
@@ -589,8 +613,11 @@ def main():
                 help="Upload CSVs. Each becomes a table. Matching columns enable JOINs.",
                 label_visibility="collapsed"
             )
-            default_csv = BASE_DIR / "data.csv"
-            conn, schema, dialect = build_database(list(uploaded) if uploaded else [], default_csv)
+            conn, schema, dialect = build_database(
+                list(uploaded) if uploaded else [],
+                demo_path,
+                load_default_csv=use_demo if has_demo else False,
+            )
         else:
             st.markdown("#### 🔌 Database connection")
             db_type = st.selectbox("Database", ["postgresql", "mysql", "mssql"], format_func=lambda x: {"postgresql": "PostgreSQL", "mysql": "MySQL", "mssql": "SQL Server"}[x])
@@ -626,7 +653,14 @@ def main():
                     st.warning("Saved connection failed. Re-enter credentials and Connect.")
         
         if not schema:
-            err = "❌ No data loaded. Add data.csv or upload CSV files." if data_source == "Upload CSV files" else "❌ Connect to a database first (enter credentials and click Connect)."
+            if data_source == "Upload CSV files":
+                err = (
+                    "❌ No data: enable **Include demo dataset** or upload at least one CSV."
+                    if demo_path.exists()
+                    else "❌ No data loaded. Upload at least one CSV file."
+                )
+            else:
+                err = "❌ Connect to a database first (enter credentials and click Connect)."
             st.error(err)
             st.stop()
         
@@ -680,19 +714,32 @@ def main():
     # --- Tabbed interface ---
     tab1, tab2, tab3, tab4 = st.tabs(["🔍 AI Search", "💬 Chat", "✏️ SQL Editor", "📈 Data Trends"])
 
-    # --- Voice input: check URL for ?voice= (from browser speech) ---
+    # --- Voice/suggestion input: check URL for ?voice= or ?suggestion= ---
     try:
         qp = st.query_params
         voice_text = qp.get("voice", "") or ""
+        suggestion_text = qp.get("suggestion", "") or ""
     except AttributeError:
         qp = st.experimental_get_query_params()
         voice_text = (qp.get("voice") or [""])[0]
+        suggestion_text = (qp.get("suggestion") or [""])[0]
     if voice_text:
         st.session_state.search_query = voice_text
         try:
             st.query_params.clear()
         except AttributeError:
             st.experimental_set_query_params()
+    elif suggestion_text:
+        st.session_state.search_query = suggestion_text
+        try:
+            st.query_params.clear()
+        except AttributeError:
+            st.experimental_set_query_params()
+
+    # Apply pending suggestion from chip click (set by on_click callback)
+    if "pending_suggestion" in st.session_state and st.session_state.pending_suggestion:
+        st.session_state.search_query = st.session_state.pending_suggestion
+        del st.session_state.pending_suggestion
 
     with tab1:
         st.markdown('<div class="search-card">', unsafe_allow_html=True)
@@ -743,8 +790,20 @@ def main():
         ]
         if len(schema) > 1:
             examples.append("Combine data from multiple tables")
-        chips_html = "".join(f'<span class="chip">{ex}</span>' for ex in examples)
-        st.markdown(f'<p style="color: #94a3b8; font-size: 0.9rem; margin-top: 0.5rem;">Try:</p><div class="chip-row">{chips_html}</div>', unsafe_allow_html=True)
+        st.caption("Try (click to fill search box):")
+
+        def _set_query(q):
+            st.session_state.pending_suggestion = q
+
+        n_ex = len(examples)
+        n_cols = 3
+        for row_start in range(0, n_ex, n_cols):
+            cols = st.columns(n_cols)
+            for j in range(n_cols):
+                i = row_start + j
+                if i < n_ex:
+                    with cols[j]:
+                        st.button(examples[i], key=f"chip_{i}", on_click=_set_query, args=(examples[i],), use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
     
     if not query:

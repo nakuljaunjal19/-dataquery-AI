@@ -29,13 +29,17 @@ git push -u origin main
    - **Main file path:** `app.py`
    - **App URL (optional):** e.g. `dataquery-ai` → `https://dataquery-ai.streamlit.app`
 4. Click **"Advanced settings"**
-5. Paste your secrets (replace with your actual key):
+5. Paste your secrets (replace with your actual Gemini key):
 
 ```toml
-GEMINI_API_KEY = "AIzaSyDln3XxBplN8kuEb3rU3f8Xut_D28coCMo"
+GEMINI_API_KEY = "your-key-here"
 ```
 
 6. Click **"Deploy"**
+
+### Demo dataset & shared links
+
+The bundled **`data.csv`** in the repo is treated as a **demo / sample** dataset so visitors can try the app immediately. They can also **upload their own CSVs** or connect to a database. Users can turn off the demo with the **Include demo dataset** checkbox in the sidebar if they want uploads only.
 
 ## Step 3: Wait & Share
 
